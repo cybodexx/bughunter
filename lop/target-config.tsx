@@ -29,22 +29,30 @@ export function TargetConfig({ onScanStart, selectedModules }: TargetConfigProps
 
   const validateUrlMutation = useMutation({
     mutationFn: async (url: string) => {
-      const response = await apiRequest("POST", "/api/validate-url", { url });
-      return response.json();
+      const res = await fetch("/api/validate-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+        credentials: "include",
+      });
+      const data = await res.json();
+      console.log("[validate-url] response:", data);
+      return data;
     },
     onSuccess: (data) => {
-      setUrlValid(data.accessible);
+      setUrlValid(data.accessible === true);
       toast({
         title: data.accessible ? "URL Validated" : "URL Not Accessible",
         description: data.message,
         variant: data.accessible ? "default" : "destructive",
       });
     },
-    onError: () => {
+    onError: (err) => {
+      console.error("[validate-url] fetch error:", err);
       setUrlValid(false);
       toast({
         title: "Validation Failed",
-        description: "Could not validate the URL",
+        description: "Could not reach the server",
         variant: "destructive",
       });
     },
