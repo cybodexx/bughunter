@@ -101,25 +101,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Invalid URL format" });
       }
 
-      // Try to reach the URL
+      // Try to reach the URL with a realistic browser User-Agent to avoid bot blocking
       const response = await axios.get(url, {
-        timeout: 10000,
+        timeout: 20000,
         validateStatus: () => true,
-        maxRedirects: 5
+        maxRedirects: 10,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+        }
       });
 
+      const isSuccessStatus = response.status >= 200 && response.status < 400;
+      const accessible = isSuccessStatus || [301, 302, 303, 307, 308].includes(response.status);
       res.json({
         valid: true,
         status: response.status,
-        accessible: response.status < 400,
-        message: response.status < 400 ? "URL is accessible" : `URL returned status ${response.status}`
+        accessible,
+        message: accessible
+          ? `URL is accessible (HTTP ${response.status})`
+          : `Server returned HTTP ${response.status}`
       });
-    } catch (error) {
-      console.error('URL validation error:', error);
+    } catch (error: any) {
+      console.error('URL validation error:', error?.message);
+      const msg =
+        error?.code === 'ECONNREFUSED'  ? 'Connection refused — server may be down' :
+        error?.code === 'ENOTFOUND'     ? 'Domain not found — check the URL' :
+        error?.code === 'ETIMEDOUT' || error?.code === 'ECONNABORTED'
+                                        ? 'Request timed out — site took too long to respond' :
+        error?.response              ? `HTTP ${error.response.status}` :
+                                       'Could not reach the URL';
       res.json({
         valid: false,
         accessible: false,
-        message: "URL is not accessible"
+        message: msg
       });
     }
   });
