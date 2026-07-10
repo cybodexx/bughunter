@@ -1,8 +1,10 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { isIP } from "net";
+import { lookup } from "dns/promises";
 import axios from "axios";
 import { storage } from "./storage";
-import { scanner } from "./scanner";
+import { scanner } from "./scanner.ts";
 import { batchScanner } from "./batch-scanner";
 import { 
   insertScanSchema, 
@@ -10,6 +12,56 @@ import {
   insertAssignmentSchema, 
   insertBatchScanSchema 
 } from "@shared/schema";
+
+function isPrivateOrReservedIp(address: string): boolean {
+  if (isIP(address) === 4) {
+    const [a, b] = address.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127);
+  }
+  if (isIP(address) === 6) {
+    const normalized = address.toLowerCase();
+    return normalized === '::1' || normalized === '::' ||
+      normalized.startsWith('fe80:') ||
+      normalized.startsWith('fc') || normalized.startsWith('fd') ||
+      normalized.startsWith('::ffff:127.');
+  }
+  return false;
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  const blockedHostnames = new Set([
+    'localhost',
+    'ip6-localhost',
+    '0.0.0.0',
+    '169.254.169.254',
+    'metadata.google.internal',
+    'metadata.google.internal.',
+    'vault'
+  ]);
+  return blockedHostnames.has(normalized) || normalized.endsWith('.localhost') || normalized.endsWith('.local');
+}
+
+function validateTargetUrl(targetUrl: string): string | null {
+  try {
+    const url = new URL(targetUrl);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return 'Only HTTP and HTTPS URLs are allowed';
+    }
+
+    if (isBlockedHostname(url.hostname) || isPrivateOrReservedIp(url.hostname)) {
+      return 'Target URL must not resolve to localhost, private IP ranges, or internal metadata endpoints';
+    }
+
+    return null;
+  } catch {
+    return 'Invalid URL format';
+  }
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get all scans
@@ -41,12 +93,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/scans", async (req, res) => {
     try {
       const validatedData = insertScanSchema.parse(req.body);
-      
-      // Validate URL format
-      try {
-        new URL(validatedData.targetUrl);
-      } catch {
-        return res.status(400).json({ message: "Invalid URL format" });
+      const validationError = validateTargetUrl(validatedData.targetUrl);
+      if (validationError) {
+        return res.status(400).json({ message: validationError });
       }
 
       const scan = await storage.createScan(validatedData);
@@ -94,11 +143,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "URL is required" });
       }
 
-      // Validate URL format
-      try {
-        new URL(url);
-      } catch {
-        return res.status(400).json({ message: "Invalid URL format" });
+      const validationError = validateTargetUrl(url);
+      if (validationError) {
+        return res.status(400).json({ message: validationError });
       }
 
       // Try to reach the URL with a realistic browser User-Agent to avoid bot blocking

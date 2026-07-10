@@ -40,6 +40,7 @@ export interface IStorage {
   getStudentScansByStudent(studentId: string): Promise<StudentScan[]>;
   getStudentScansByAssignment(assignmentId: string): Promise<StudentScan[]>;
   calculateSecurityScore(scanId: string): Promise<number>;
+  incrementRequestCount(scanId: string): Promise<void>;
 }
 
 export class MemStorage implements IStorage {
@@ -227,6 +228,12 @@ export class MemStorage implements IStorage {
     const updatedBatchScan = { ...batchScan, ...updates };
     this.batchScans.set(id, updatedBatchScan);
     return updatedBatchScan;
+  }
+
+  async incrementRequestCount(scanId: string): Promise<void> {
+    const scan = this.scans.get(scanId);
+    if (!scan) return;
+    this.scans.set(scanId, { ...scan, requestsSent: scan.requestsSent + 1 });
   }
 
   // Student scan operations

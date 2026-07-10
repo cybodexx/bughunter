@@ -1,5 +1,5 @@
 import { storage } from './storage';
-import { scanner } from './scanner';
+import { scanner } from './scanner.ts';
 import { type BatchScan, type Scan, type InsertScan } from '@shared/schema';
 
 export class BatchScanner {

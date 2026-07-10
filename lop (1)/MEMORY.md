@@ -1,0 +1,1 @@
+- [Workflow port detection quirk](workflow-port-detection.md) — server opens 5000 correctly, workflow still shows FAILED; platform-side timing issue, not a code problem.

@@ -234,8 +234,9 @@ export class SecurityScanner {
     return errorPatterns.some(p => p.test(response));
   }
 
-  private extractSqlErrorEvidence(response: string): string {
-    const lines = response.split('\n');
+  private extractSqlErrorEvidence(response: unknown): string {
+    const normalized = this.normalizeResponseData(response);
+    const lines = normalized.split('\n');
     for (const line of lines) {
       if (this.detectSqlErrors(line)) return line.trim().substring(0, 200);
     }
@@ -256,6 +257,33 @@ export class SecurityScanner {
       /admin panel/i, /dashboard/i, /control panel/i, /administrator/i,
       /wp-admin/i, /<title>.*admin/i, /user management/i, /system settings/i
     ].some(p => p.test(response));
+  }
+
+  private normalizeResponseData(response: unknown): string {
+    if (typeof response === 'string') return response;
+    if (response === null || response === undefined) return '';
+    if (typeof response === 'object') {
+      try {
+        return JSON.stringify(response);
+      } catch {
+        return String(response);
+      }
+    }
+    return String(response);
+  }
+
+  private getOriginalParamValues(params: URLSearchParams, key: string): string[] {
+    return params.getAll(key);
+  }
+
+  private replaceParamValue(params: URLSearchParams, key: string, payload: string): void {
+    params.delete(key);
+    params.append(key, payload);
+  }
+
+  private restoreParamValues(params: URLSearchParams, key: string, originalValues: string[]): void {
+    params.delete(key);
+    originalValues.forEach(value => params.append(key, value));
   }
 
   private detectCommandExecution(response: string, _payload: string): boolean {
@@ -348,11 +376,12 @@ export class SecurityScanner {
     for (const payload of sqlPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          const originalValue = params.get(key);
-          params.set(key, payload);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -360,7 +389,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectSqlErrors(response.data)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectSqlErrors(responseText)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'sql_injection',
@@ -370,7 +400,7 @@ export class SecurityScanner {
               url: testUrl.toString(),
               parameter: key,
               payload,
-              evidence: this.extractSqlErrorEvidence(response.data),
+              evidence: this.extractSqlErrorEvidence(responseText),
               recommendation: 'Use parameterized queries (prepared statements) and enforce input validation. Never concatenate user input directly into SQL strings. Apply principle of least privilege to the database account.',
               cweId: 'CWE-89',
               cvssScore: '7.5'
@@ -378,8 +408,7 @@ export class SecurityScanner {
             break;
           }
 
-          if (originalValue) params.set(key, originalValue);
-          else params.delete(key);
+          this.restoreParamValues(params, key, originalValues);
         }
       } catch (_) { /* continue */ }
     }
@@ -402,10 +431,12 @@ export class SecurityScanner {
     for (const payload of xssPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          params.set(key, payload);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -413,7 +444,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (response.data.includes(payload)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (responseText.includes(payload)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'xss',
@@ -446,9 +478,10 @@ export class SecurityScanner {
     for (const payload of traversalPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        testUrl.pathname += (testUrl.pathname.endsWith('/') ? '' : '/') + payload;
+        const injectedPath = `${testUrl.pathname.replace(/\/$/, '')}/${payload}`;
+        const testUrlString = `${testUrl.origin}${injectedPath}${testUrl.search}${testUrl.hash}`;
 
-        const response = await axios.get(testUrl.toString(), {
+        const response = await axios.get(testUrlString, {
           timeout: 10000, validateStatus: () => true
         });
         await this.incrementRequestCount(scan.id);
@@ -486,11 +519,13 @@ export class SecurityScanner {
     for (const payload of commandPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          const originalValue = params.get(key);
-          params.set(key, `${originalValue}${payload}`);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          const originalValue = originalValues[0] || '';
+          this.replaceParamValue(params, key, `${originalValue}${payload}`);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -498,7 +533,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectCommandExecution(response.data, payload)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectCommandExecution(responseText, payload)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'command_injection',
@@ -531,11 +567,12 @@ export class SecurityScanner {
     for (const payload of ldapPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          const originalValue = params.get(key);
-          params.set(key, payload);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -543,7 +580,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectLdapVulnerability(response.data)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectLdapVulnerability(responseText)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'ldap_injection',
@@ -581,11 +619,12 @@ export class SecurityScanner {
     for (const payload of xmlPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          const originalValue = params.get(key);
-          params.set(key, payload);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -593,7 +632,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectXmlInjection(response.data)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectXmlInjection(responseText)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'xml_injection',
@@ -630,11 +670,12 @@ export class SecurityScanner {
     for (const payload of nosqlPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          const originalValue = params.get(key);
-          params.set(key, payload);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -642,7 +683,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectNoSqlInjection(response.data)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectNoSqlInjection(responseText)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'nosql_injection',
@@ -678,11 +720,12 @@ export class SecurityScanner {
     for (const payload of sstiPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
-          const originalValue = params.get(key);
-          params.set(key, payload);
+        for (const key of Array.from(new Set(originalParams.keys()))) {
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -690,7 +733,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectSSTI(response.data, payload)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectSSTI(responseText, payload)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'ssti',
@@ -763,13 +807,14 @@ export class SecurityScanner {
     for (const payload of ssrfPayloads) {
       try {
         const testUrl = new URL(scan.targetUrl);
-        const params = new URLSearchParams(testUrl.search);
+        const originalParams = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
+        for (const key of Array.from(new Set(originalParams.keys()))) {
           if (!['url', 'link', 'callback', 'redirect', 'next', 'to', 'src'].some(k => key.toLowerCase().includes(k))) continue;
 
-          const originalValue = params.get(key);
-          params.set(key, payload);
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -777,7 +822,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectSSRF(response.data, payload)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectSSRF(responseText, payload)) {
             await storage.createVulnerability({
               scanId: scan.id,
               type: 'ssrf',
@@ -1006,11 +1052,12 @@ export class SecurityScanner {
         const testUrl = new URL(scan.targetUrl);
         const params = new URLSearchParams(testUrl.search);
 
-        for (const [key] of Array.from(params.entries())) {
+        for (const key of Array.from(new Set(originalParams.keys()))) {
           if (!['file', 'include', 'page', 'path', 'template', 'load', 'view'].some(k => key.toLowerCase().includes(k))) continue;
 
-          const originalValue = params.get(key);
-          params.set(key, payload);
+          const params = new URLSearchParams(originalParams);
+          const originalValues = this.getOriginalParamValues(params, key);
+          this.replaceParamValue(params, key, payload);
           testUrl.search = params.toString();
 
           const response = await axios.get(testUrl.toString(), {
@@ -1018,7 +1065,8 @@ export class SecurityScanner {
           });
           await this.incrementRequestCount(scan.id);
 
-          if (this.detectFileInclusion(response.data, payload)) {
+          const responseText = this.normalizeResponseData(response.data);
+          if (this.detectFileInclusion(responseText, payload)) {
             const isRFI = payload.startsWith('http') || payload.startsWith('ftp');
             await storage.createVulnerability({
               scanId: scan.id,
