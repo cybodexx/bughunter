@@ -116,3 +116,101 @@ This project performs active scanning of web targets. Only scan systems you own 
 ---
 
 For a walkthrough or to add deployment automation (Docker Compose, CI/CD), tell me how you'd like to host it and I will add the necessary files and instructions.
+
+## Scanner — Detailed Explanation & Steps
+
+### Overview
+
+The server-side scanner (`lop/scanner.ts`) is the core engine that performs automated security tests against a target URL and persists findings to the storage layer. It is implemented as a `SecurityScanner` class and exported as `scanner` for use by the API routes.
+
+### Main components
+
+- `SecurityScanner` class: manages a `modules` registry and runs enabled tests for each scan.
+- Modules: each module has an id, a human-friendly `name`, a `test(scan: Scan)` async function, and a `weight` (used to calculate progress).
+- `storage` (see [lop/storage.ts](lop/storage.ts#L1)): persisting scans, vulnerabilities, and progress updates.
+
+### Data flow (what happens when a scan is started)
+
+1. Client POSTs to `/api/scans` (see [lop/routes.ts](lop/routes.ts#L1)). The payload is validated against Zod schemas.
+2. Server creates a `Scan` record via `storage.createScan(...)` and returns the created scan.
+3. Server calls `scanner.startScan(scanId)` asynchronously.
+4. `startScan` updates the scan status to `running`, computes total weight from enabled modules, and iterates the enabled modules:
+	 - Sets `currentModule` and persists it to storage.
+	 - Calls the module's `test(scan)` to perform HTTP probes and detection.
+	 - After each module, updates `progress` based on module `weight`.
+5. Modules call `storage.createVulnerability(...)` when they detect evidence.
+6. On completion `startScan` sets status `completed`; on unrecoverable error it sets `failed`.
+
+### How to run a scan (API example)
+
+Use the `POST /api/scans` endpoint with a JSON body matching the server's `insertScanSchema`. Example curl:
+
+```bash
+curl -X POST http://localhost:5000/api/scans \
+	-H 'Content-Type: application/json' \
+	-d '{
+		"targetUrl": "http://example.com/page?param=1",
+		"enabledModules": ["sql_injection","xss"],
+		"intensity": "high"
+	}'
+```
+
+After creating the scan, check progress and results:
+
+```bash
+curl http://localhost:5000/api/scans
+curl http://localhost:5000/api/scans/<scanId>/vulnerabilities
+```
+
+### Run scanner manually (for development testing)
+
+You can create a scan record directly in the DB/storage layer and call `scanner.startScan(scanId)` from the running server context (for example, in a temporary script or REPL). Example Node snippet (inside the running app environment):
+
+```js
+import { storage } from './lop/storage';
+import { scanner } from './lop/scanner';
+
+async function quickTest() {
+	const scan = await storage.createScan({
+		targetUrl: 'http://localhost:3000/?q=1',
+		enabledModules: ['sql_injection','xss'],
+		intensity: 'low'
+	});
+	await scanner.startScan(scan.id);
+}
+
+quickTest();
+```
+
+### Adding a new module
+
+1. Implement the test method on `SecurityScanner`, e.g. `private async testMyCheck(scan: Scan)`.
+2. Register it in `initializeModules()`:
+
+```ts
+this.modules.set('my_check', {
+	name: 'My Check',
+	test: this.testMyCheck.bind(this),
+	weight: 10
+});
+```
+
+3. Optionally expose the module id in the frontend module-selection UI so users can enable it.
+
+### Detection helpers and evidence
+
+The scanner contains many helper functions (e.g., `detectSqlErrors`, `detectXXE`, `detectSSRF`, `extractCommandEvidence`) that normalize responses and match patterns. When a module finds a problem, it saves a vulnerability record including `title`, `description`, `severity`, `evidence`, and `recommendation`.
+
+### Troubleshooting & safety
+
+- Modules run in try/catch; one failure won't abort the whole scan.
+- If progress stalls, inspect server logs and storage entries: the `currentModule` field shows which module is running.
+- ALWAYS run scans only against systems you own or have explicit permission to test. This tool actively probes web targets and can cause load or trigger defenses.
+
+### Files to review
+
+- Implementation: [lop/scanner.ts](lop/scanner.ts#L1)
+- API integration: [lop/routes.ts](lop/routes.ts#L1)
+- Persistence: [lop/storage.ts](lop/storage.ts#L1)
+
+If you want, I can add a ready-to-run example script under `tools/` that creates a scan and waits for completion, and I can include sample responses for the README. Tell me if you want that and I'll add it.
